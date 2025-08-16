@@ -5,7 +5,7 @@ from collections import deque
 import random
 
 from google.genai import types
-from voice_assistant.config import JD, CR, prompt, MODEL, client
+from voice_assistant.config import prompt, MODEL, client
 
 FORMAT = pyaudio.paInt16
 RECEIVE_SAMPLE_RATE = 24000
@@ -24,12 +24,22 @@ from google.genai.types import (
 
 # Global stop event for controlling the audio loop
 _stop_event = None
+# Global variables for JD and CR
+_jd = None
+_cr = None
 
 
 def set_stop_event(stop_event):
     """Set the global stop event for controlling audio loop"""
     global _stop_event
     _stop_event = stop_event
+
+
+def set_jd_cr(jd, cr):
+    """Set the global Job Description and Candidate Resume"""
+    global _jd, _cr
+    _jd = jd
+    _cr = cr
 
 
 def _should_stop():
@@ -103,18 +113,27 @@ order_status_tool = Tool(
     ]
 )
 
-CONFIG = LiveConnectConfig(
-    response_modalities=["AUDIO"],
-    output_audio_transcription={},
-    input_audio_transcription={},
-    speech_config=SpeechConfig(
-        voice_config=VoiceConfig(
-            prebuilt_voice_config=PrebuiltVoiceConfig(voice_name="Puck")
-        )
-    ),
-    system_instruction=prompt(JD, CR),
-    tools=[order_status_tool],
-)
+
+def get_config():
+    """Create LiveConnectConfig with current JD and CR"""
+    global _jd, _cr
+
+    # Use provided JD and CR or fallback to empty strings
+    jd = _jd if _jd else ""
+    cr = _cr if _cr else ""
+
+    return LiveConnectConfig(
+        response_modalities=["AUDIO"],
+        output_audio_transcription={},
+        input_audio_transcription={},
+        speech_config=SpeechConfig(
+            voice_config=VoiceConfig(
+                prebuilt_voice_config=PrebuiltVoiceConfig(voice_name="Puck")
+            )
+        ),
+        system_instruction=prompt(jd, cr),
+        tools=[order_status_tool],
+    )
 
 
 class AudioManager:
@@ -205,8 +224,11 @@ async def audio_loop():
     try:
         await audio_manager.initialize()
 
+        # Get config with current JD and CR
+        config = get_config()
+
         async with (
-            client.aio.live.connect(model=MODEL, config=CONFIG) as session,
+            client.aio.live.connect(model=MODEL, config=config) as session,
             asyncio.TaskGroup() as tg,
         ):
             # Queue for user audio chunks to control flow

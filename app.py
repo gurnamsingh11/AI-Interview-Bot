@@ -3,7 +3,7 @@ import threading
 import time
 import asyncio
 from face_tracker.camera import generate_frames
-from voice_assistant.main import run_audio_loop, set_stop_event
+from voice_assistant.main import run_audio_loop, set_stop_event, set_jd_cr
 
 st.set_page_config(layout="wide", page_title="Voice + Vision AI Assistant")
 
@@ -16,6 +16,10 @@ if "camera_active" not in st.session_state:
     st.session_state.camera_active = False
 if "camera_stop_event" not in st.session_state:
     st.session_state.camera_stop_event = threading.Event()
+if "jd_text" not in st.session_state:
+    st.session_state.jd_text = ""
+if "cr_text" not in st.session_state:
+    st.session_state.cr_text = ""
 
 # Page header
 st.title("AI Interview Bot")
@@ -27,8 +31,56 @@ sidebar_col, main_col = st.columns([1, 3])
 with sidebar_col:
     st.header("Config")
 
+    # Job Description and Candidate Resume Input
+    st.subheader("📝 Interview Setup")
+
+    # Job Description input
+    jd_input = st.text_area(
+        "Job Description",
+        value=st.session_state.jd_text,
+        height=150,
+        placeholder="Paste the job description here...",
+        help="Enter the job description for the interview",
+    )
+
+    # Candidate Resume input
+    cr_input = st.text_area(
+        "Candidate Resume",
+        value=st.session_state.cr_text,
+        height=150,
+        placeholder="Paste the candidate's resume here...",
+        help="Enter the candidate's resume for the interview",
+    )
+
+    # Update session state when inputs change
+    if jd_input != st.session_state.jd_text:
+        st.session_state.jd_text = jd_input
+        # Update the global variables in voice assistant
+        set_jd_cr(jd_input, st.session_state.cr_text)
+
+    if cr_input != st.session_state.cr_text:
+        st.session_state.cr_text = cr_input
+        # Update the global variables in voice assistant
+        set_jd_cr(st.session_state.jd_text, cr_input)
+
+    # Show status of JD and CR
+    jd_status = "✅ Ready" if st.session_state.jd_text.strip() else "❌ Missing"
+    cr_status = "✅ Ready" if st.session_state.cr_text.strip() else "❌ Missing"
+
+    st.markdown(f"**JD Status:** {jd_status}")
+    st.markdown(f"**Resume Status:** {cr_status}")
+
+    # Warning if either is missing
+    if not st.session_state.jd_text.strip() or not st.session_state.cr_text.strip():
+        st.warning(
+            "⚠️ Please provide both Job Description and Candidate Resume before starting the voice assistant.",
+            icon="⚠️",
+        )
+
+    st.divider()
+
     # Camera controls
-    st.subheader("Camera")
+    st.subheader("📹 Camera")
 
     if st.button("🟢 Start Camera", key="start_camera", use_container_width=True):
         if not st.session_state.camera_active:
@@ -50,8 +102,21 @@ with sidebar_col:
     # Voice assistant controls
     st.subheader("🎙️ Voice Assistant")
 
-    if st.button("🟢 Start Voice", key="start_voice", use_container_width=True):
-        if not st.session_state.voice_active:
+    # Check if JD and CR are provided
+    can_start_voice = bool(
+        st.session_state.jd_text.strip() and st.session_state.cr_text.strip()
+    )
+
+    if st.button(
+        "🟢 Start Voice",
+        key="start_voice",
+        use_container_width=True,
+        disabled=not can_start_voice,
+    ):
+        if not st.session_state.voice_active and can_start_voice:
+            # Set JD and CR before starting
+            set_jd_cr(st.session_state.jd_text, st.session_state.cr_text)
+
             st.session_state.voice_active = True
             # Create a stop event for the voice assistant
             voice_stop_event = threading.Event()
@@ -85,6 +150,13 @@ with sidebar_col:
             st.session_state.voice_active = False
 
     st.markdown(f"**Status:** {voice_indicator}")
+
+    # Show helpful tip when voice is disabled
+    if not can_start_voice:
+        st.info(
+            "💡 Complete the Job Description and Resume fields above to enable voice assistant",
+            icon="💡",
+        )
 
     st.divider()
 
@@ -141,11 +213,41 @@ with main_col:
         <div style="text-align: center; padding: 2rem 0; background: linear-gradient(90deg, #667eea 0%, #764ba2 100%); 
                     border-radius: 10px; margin: 1rem 0; color: white;">
             <h2 style="margin: 0;">🚀 Ready to Get Started?</h2>
-            <p style="margin: 0.5rem 0; font-size: 1.1em;">Activate camera and voice for the full AI experience!</p>
+            <p style="margin: 0.5rem 0; font-size: 1.1em;">Complete the interview setup, then activate camera and voice for the full AI experience!</p>
         </div>
         """,
             unsafe_allow_html=True,
         )
+
+        # Interview setup status
+        col1, col2 = st.columns(2)
+
+        with col1:
+            st.markdown("#### 📋 Setup Checklist")
+            setup_items = [
+                ("Job Description", "✅" if st.session_state.jd_text.strip() else "❌"),
+                (
+                    "Candidate Resume",
+                    "✅" if st.session_state.cr_text.strip() else "❌",
+                ),
+                ("Camera Ready", "✅" if st.session_state.camera_active else "⏸️"),
+                ("Voice Assistant", "✅" if st.session_state.voice_active else "⏸️"),
+            ]
+
+            for item, status in setup_items:
+                st.markdown(f"**{item}:** {status}")
+
+        with col2:
+            st.markdown("#### 🎯 Next Steps")
+            if not st.session_state.jd_text.strip():
+                st.markdown("1. 📝 Add Job Description")
+            elif not st.session_state.cr_text.strip():
+                st.markdown("1. 📄 Add Candidate Resume")
+            elif not st.session_state.voice_active:
+                st.markdown("1. 🎙️ Start Voice Assistant")
+                st.markdown("2. 📹 Start Camera (optional)")
+            else:
+                st.markdown("✨ **All set! Interview ready to begin.**")
 
 # Periodic status update (only when camera is not active to avoid interference)
 if not st.session_state.camera_active:
