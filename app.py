@@ -18,17 +18,17 @@ if "camera_stop_event" not in st.session_state:
     st.session_state.camera_stop_event = threading.Event()
 
 # Page header
-st.title("🎥 Voice + Vision AI Assistant")
+st.title("AI Interview Bot")
 
 # Create two columns: sidebar and main content
 sidebar_col, main_col = st.columns([1, 3])
 
 # Control panel in left column
 with sidebar_col:
-    st.header("🎮 Controls")
+    st.header("Config")
 
     # Camera controls
-    st.subheader("📹 Camera")
+    st.subheader("Camera")
 
     if st.button("🟢 Start Camera", key="start_camera", use_container_width=True):
         if not st.session_state.camera_active:
@@ -88,36 +88,6 @@ with sidebar_col:
 
     st.divider()
 
-    # Quick stats
-    st.subheader("📊 Quick Info")
-    st.markdown(
-        """
-    - **Camera**: Face tracking with pose estimation
-    - **Voice**: AI-powered conversation
-    - **Orders**: Ask about order status
-    - **Control**: Independent start/stop
-    """
-    )
-
-    # Help section
-    with st.expander("❓ Need Help?"):
-        st.markdown(
-            """
-        **Camera Issues:**
-        - Make sure webcam is connected
-        - Check browser permissions
-        - Try refreshing the page
-        
-        **Voice Issues:**
-        - Ensure microphone access
-        - Speak clearly and wait for response
-        - Check audio device settings
-        
-        **General:**
-        - Both systems work independently
-        - Stop and restart if needed
-        """
-        )
 
 # Main content area
 with main_col:
@@ -163,7 +133,7 @@ with main_col:
 
     else:
         # Welcome screen when camera is off
-        st.markdown("### 📱 Welcome to Voice + Vision AI Assistant")
+        st.markdown("### 📱 AI Powered Interviewer")
 
         # Hero section
         st.markdown(
@@ -176,99 +146,6 @@ with main_col:
         """,
             unsafe_allow_html=True,
         )
-
-        # Features grid
-        col1, col2 = st.columns(2)
-
-        with col1:
-            st.markdown(
-                """
-            #### 📹 Face Tracking
-            
-            🎯 **Real-time Detection**  
-            Advanced face recognition with MediaPipe
-            
-            📐 **Head Pose Estimation**  
-            Precise pitch and yaw angle calculation
-            
-            ✅ **Forward Detection**  
-            Visual feedback when looking at camera
-            
-            🔄 **Live Updates**  
-            Smooth 30fps video processing
-            """
-            )
-
-        with col2:
-            st.markdown(
-                """
-            #### 🎙️ Voice Assistant
-            
-            🤖 **Gemini AI**  
-            Powered by Google's advanced AI model
-            
-            📦 **Order Tracking**  
-            Ask "Status of order 12345" 
-            
-            🎵 **Natural Speech**  
-            Human-like conversation flow
-            
-            ⚡ **Real-time Audio**  
-            Low-latency voice processing
-            """
-            )
-
-        # Instructions
-        st.markdown("---")
-        st.markdown("### 🎮 How to Use")
-
-        instruction_col1, instruction_col2, instruction_col3 = st.columns(3)
-
-        with instruction_col1:
-            st.markdown(
-                """
-            **Step 1: Camera** 📹  
-            Click **"Start Camera"** to activate face tracking.  
-            The video will appear here in full width.
-            """
-            )
-
-        with instruction_col2:
-            st.markdown(
-                """
-            **Step 2: Voice** 🎙️  
-            Click **"Start Voice"** to enable AI conversation.  
-            Start talking and the AI will respond.
-            """
-            )
-
-        with instruction_col3:
-            st.markdown(
-                """
-            **Step 3: Interact** 💬  
-            Try asking about order status or just chat!  
-            Stop either component anytime.
-            """
-            )
-
-        # Example interactions
-        with st.expander("💡 Example Interactions", expanded=False):
-            st.markdown(
-                """
-            **Voice Commands to Try:**
-            - "What's the status of order 12345?"
-            - "Hello, how are you today?"
-            - "Can you help me with my order ABC789?"
-            - "Tell me about the weather"
-            - "What can you do?"
-            
-            **Camera Features:**
-            - Look directly at camera for "Looking Forward" (green text)
-            - Turn your head to see "Not Looking Forward" (red text)  
-            - Notice the pitch and yaw angle readings
-            - Works best with good lighting
-            """
-            )
 
 # Periodic status update (only when camera is not active to avoid interference)
 if not st.session_state.camera_active:

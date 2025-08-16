@@ -3,13 +3,9 @@ import traceback
 import pyaudio
 from collections import deque
 import random
-import threading
 
 from google.genai import types
-
-# from config import JD, CR
 from voice_assistant.config import JD, CR, prompt, MODEL, client
-
 
 FORMAT = pyaudio.paInt16
 RECEIVE_SAMPLE_RATE = 24000
@@ -22,7 +18,6 @@ from google.genai.types import (
     SpeechConfig,
     VoiceConfig,
     PrebuiltVoiceConfig,
-    # added to allow for function calling / tooling
     FunctionDeclaration,
     Tool,
 )
@@ -37,23 +32,23 @@ def set_stop_event(stop_event):
     _stop_event = stop_event
 
 
-# Mock function for get_order_status
+def _should_stop():
+    """Check if we should stop the audio processing"""
+    global _stop_event
+    return _stop_event and _stop_event.is_set()
+
+
+# Mock function for get_order_status (exactly as your original)
 def get_order_status(order_id):
     """Mock order status API that returns randomized status for an order ID."""
-    # Define possible order statuses and shipment methods
     statuses = ["processing", "shipped", "delivered"]
     shipment_methods = ["standard", "express", "next day", "international"]
 
-    # Generate random data based on the order ID to ensure consistency for the same ID
-    # Using the sum of ASCII values of the order ID as a seed
     seed = sum(ord(c) for c in str(order_id))
     random.seed(seed)
 
-    # Generate order data
     status = random.choice(statuses)
     shipment = random.choice(shipment_methods)
-
-    # Generate dates based on status
     order_date = "2024-05-" + str(random.randint(12, 28)).zfill(2)
 
     estimated_delivery = None
@@ -69,7 +64,6 @@ def get_order_status(order_id):
         shipped_date = "2024-05-" + str(random.randint(1, 20)).zfill(2)
         delivered_date = "2024-05-" + str(random.randint(21, 28)).zfill(2)
 
-    # Reset random seed to ensure other functions aren't affected
     random.seed()
 
     result = {
@@ -82,16 +76,14 @@ def get_order_status(order_id):
 
     if shipped_date:
         result["shipped_date"] = shipped_date
-
     if delivered_date:
         result["delivered_date"] = delivered_date
 
     print(f"Order status for {order_id}: {status}")
-
     return result
 
 
-# Define the order status tool
+# Define the order status tool (exactly as your original)
 order_status_tool = Tool(
     function_declarations=[
         FunctionDeclaration(
@@ -110,7 +102,6 @@ order_status_tool = Tool(
         )
     ]
 )
-
 
 CONFIG = LiveConnectConfig(
     response_modalities=["AUDIO"],
@@ -136,7 +127,6 @@ class AudioManager:
         self.audio_queue = deque()
         self.is_playing = False
         self.playback_task = None
-        self._cleanup_done = False
 
     async def initialize(self):
         mic_info = self.pya.get_default_input_device_info()
@@ -170,7 +160,7 @@ class AudioManager:
     async def play_audio(self):
         """Play all queued audio data"""
         print("🗣️ Gemini talking")
-        while self.audio_queue and not self._should_stop():
+        while self.audio_queue and not _should_stop():
             try:
                 audio_data = self.audio_queue.popleft()
                 await asyncio.to_thread(self.output_stream.write, audio_data)
@@ -185,26 +175,15 @@ class AudioManager:
         self.audio_queue.clear()
         self.is_playing = False
 
-        # Important: Start a clean state for next response
         if self.playback_task and not self.playback_task.done():
             self.playback_task.cancel()
 
-    def _should_stop(self):
-        """Check if we should stop the audio processing"""
-        global _stop_event
-        return _stop_event and _stop_event.is_set()
-
     async def cleanup(self):
         """Cleanup audio resources"""
-        if self._cleanup_done:
-            return
-
         print("🔧 Cleaning up audio resources...")
 
-        # Cancel any ongoing playback
         self.interrupt()
 
-        # Close streams
         if self.input_stream:
             await asyncio.to_thread(self.input_stream.stop_stream)
             await asyncio.to_thread(self.input_stream.close)
@@ -213,32 +192,29 @@ class AudioManager:
             await asyncio.to_thread(self.output_stream.stop_stream)
             await asyncio.to_thread(self.output_stream.close)
 
-        # Terminate PyAudio
         await asyncio.to_thread(self.pya.terminate)
-
-        self._cleanup_done = True
         print("✅ Audio cleanup complete")
 
 
 async def audio_loop():
-    global _stop_event
-
+    """Main audio loop - based on your original with stop control added"""
     audio_manager = AudioManager(
         input_sample_rate=SEND_SAMPLE_RATE, output_sample_rate=RECEIVE_SAMPLE_RATE
     )
 
-    session = None
-
     try:
         await audio_manager.initialize()
 
-        async with client.aio.live.connect(model=MODEL, config=CONFIG) as session:
+        async with (
+            client.aio.live.connect(model=MODEL, config=CONFIG) as session,
+            asyncio.TaskGroup() as tg,
+        ):
             # Queue for user audio chunks to control flow
             audio_queue = asyncio.Queue()
 
             async def listen_for_audio():
                 """Just captures audio and puts it in the queue"""
-                while not audio_manager._should_stop():
+                while not _should_stop():
                     try:
                         data = await asyncio.to_thread(
                             audio_manager.input_stream.read,
@@ -247,16 +223,15 @@ async def audio_loop():
                         )
                         await audio_queue.put(data)
                     except Exception as e:
-                        if not audio_manager._should_stop():
+                        if not _should_stop():
                             print(f"Error in audio capture: {e}")
                         break
 
             async def process_and_send_audio():
                 """Processes audio from queue and sends to Gemini"""
-                while not audio_manager._should_stop():
+                while not _should_stop():
                     try:
-                        # Use timeout to avoid hanging
-                        data = await asyncio.wait_for(audio_queue.get(), timeout=0.1)
+                        data = await audio_queue.get()
 
                         # Always send the audio data to Gemini
                         await session.send_realtime_input(
@@ -265,23 +240,22 @@ async def audio_loop():
                                 "mime_type": f"audio/pcm;rate={SEND_SAMPLE_RATE}",
                             }
                         )
-
                         audio_queue.task_done()
-                    except asyncio.TimeoutError:
-                        continue
+
                     except Exception as e:
-                        if not audio_manager._should_stop():
+                        if not _should_stop():
                             print(f"Error in audio processing: {e}")
                         break
 
             async def receive_and_play():
-                while not audio_manager._should_stop():
+                """Receive responses and play audio - your original logic"""
+                while not _should_stop():
                     try:
                         input_transcriptions = []
                         output_transcriptions = []
 
                         async for response in session.receive():
-                            if audio_manager._should_stop():
+                            if _should_stop():
                                 break
 
                             # retrieve continously resumable session ID
@@ -292,9 +266,7 @@ async def audio_loop():
 
                             # Check if the connection will be soon terminated
                             if response.go_away is not None:
-                                print(
-                                    f"Connection terminating in: {response.go_away.time_left}"
-                                )
+                                print(response.go_away.time_left)
 
                             # Handle tool calls
                             if response.tool_call:
@@ -377,6 +349,7 @@ async def audio_loop():
                             if input_transcription and input_transcription.text:
                                 input_transcriptions.append(input_transcription.text)
 
+                        # Print transcriptions (your original logic)
                         if output_transcriptions:
                             print(
                                 f"Output transcription: {''.join(output_transcriptions)}"
@@ -387,21 +360,19 @@ async def audio_loop():
                             )
 
                     except Exception as e:
-                        if not audio_manager._should_stop():
+                        if not _should_stop():
                             print(f"Error in receive_and_play: {e}")
                             traceback.print_exc()
                         break
 
-            # Start all tasks
-            async with asyncio.TaskGroup() as tg:
-                tg.create_task(listen_for_audio())
-                tg.create_task(process_and_send_audio())
-                tg.create_task(receive_and_play())
+            # Start all tasks with proper task creation
+            tg.create_task(listen_for_audio())
+            tg.create_task(process_and_send_audio())
+            tg.create_task(receive_and_play())
 
     except Exception as e:
         print(f"Error in audio loop: {e}")
         traceback.print_exc()
-
     finally:
         # Always cleanup
         await audio_manager.cleanup()
