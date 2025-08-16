@@ -3,6 +3,7 @@ import traceback
 import pyaudio
 from collections import deque
 import random
+import threading
 
 from google.genai import types
 
@@ -25,6 +26,15 @@ from google.genai.types import (
     FunctionDeclaration,
     Tool,
 )
+
+# Global stop event for controlling the audio loop
+_stop_event = None
+
+
+def set_stop_event(stop_event):
+    """Set the global stop event for controlling audio loop"""
+    global _stop_event
+    _stop_event = stop_event
 
 
 # Mock function for get_order_status
@@ -106,11 +116,6 @@ CONFIG = LiveConnectConfig(
     response_modalities=["AUDIO"],
     output_audio_transcription={},
     input_audio_transcription={},
-    # session_resumption=types.SessionResumptionConfig(
-    # The handle of the session to resume is passed here,
-    # or else None to start a new session.
-    # handle="93f6ae1d-2420-40e9-828c-776cf553b7a6"
-    # ),
     speech_config=SpeechConfig(
         voice_config=VoiceConfig(
             prebuilt_voice_config=PrebuiltVoiceConfig(voice_name="Puck")
@@ -131,6 +136,7 @@ class AudioManager:
         self.audio_queue = deque()
         self.is_playing = False
         self.playback_task = None
+        self._cleanup_done = False
 
     async def initialize(self):
         mic_info = self.pya.get_default_input_device_info()
@@ -164,12 +170,13 @@ class AudioManager:
     async def play_audio(self):
         """Play all queued audio data"""
         print("🗣️ Gemini talking")
-        while self.audio_queue:
+        while self.audio_queue and not self._should_stop():
             try:
                 audio_data = self.audio_queue.popleft()
                 await asyncio.to_thread(self.output_stream.write, audio_data)
             except Exception as e:
                 print(f"Error playing audio: {e}")
+                break
 
         self.is_playing = False
 
@@ -182,166 +189,233 @@ class AudioManager:
         if self.playback_task and not self.playback_task.done():
             self.playback_task.cancel()
 
+    def _should_stop(self):
+        """Check if we should stop the audio processing"""
+        global _stop_event
+        return _stop_event and _stop_event.is_set()
+
+    async def cleanup(self):
+        """Cleanup audio resources"""
+        if self._cleanup_done:
+            return
+
+        print("🔧 Cleaning up audio resources...")
+
+        # Cancel any ongoing playback
+        self.interrupt()
+
+        # Close streams
+        if self.input_stream:
+            await asyncio.to_thread(self.input_stream.stop_stream)
+            await asyncio.to_thread(self.input_stream.close)
+
+        if self.output_stream:
+            await asyncio.to_thread(self.output_stream.stop_stream)
+            await asyncio.to_thread(self.output_stream.close)
+
+        # Terminate PyAudio
+        await asyncio.to_thread(self.pya.terminate)
+
+        self._cleanup_done = True
+        print("✅ Audio cleanup complete")
+
 
 async def audio_loop():
+    global _stop_event
+
     audio_manager = AudioManager(
         input_sample_rate=SEND_SAMPLE_RATE, output_sample_rate=RECEIVE_SAMPLE_RATE
     )
 
-    await audio_manager.initialize()
+    session = None
 
-    async with (
-        client.aio.live.connect(model=MODEL, config=CONFIG) as session,
-        asyncio.TaskGroup() as tg,
-    ):
+    try:
+        await audio_manager.initialize()
 
-        # Queue for user audio chunks to control flow
-        audio_queue = asyncio.Queue()
+        async with client.aio.live.connect(model=MODEL, config=CONFIG) as session:
+            # Queue for user audio chunks to control flow
+            audio_queue = asyncio.Queue()
 
-        async def listen_for_audio():
-            """Just captures audio and puts it in the queue"""
-            while True:
-                data = await asyncio.to_thread(
-                    audio_manager.input_stream.read,
-                    CHUNK_SIZE,
-                    exception_on_overflow=False,
-                )
-                await audio_queue.put(data)
+            async def listen_for_audio():
+                """Just captures audio and puts it in the queue"""
+                while not audio_manager._should_stop():
+                    try:
+                        data = await asyncio.to_thread(
+                            audio_manager.input_stream.read,
+                            CHUNK_SIZE,
+                            exception_on_overflow=False,
+                        )
+                        await audio_queue.put(data)
+                    except Exception as e:
+                        if not audio_manager._should_stop():
+                            print(f"Error in audio capture: {e}")
+                        break
 
-        async def process_and_send_audio():
-            """Processes audio from queue and sends to Gemini"""
-            while True:
-                data = await audio_queue.get()
+            async def process_and_send_audio():
+                """Processes audio from queue and sends to Gemini"""
+                while not audio_manager._should_stop():
+                    try:
+                        # Use timeout to avoid hanging
+                        data = await asyncio.wait_for(audio_queue.get(), timeout=0.1)
 
-                # Always send the audio data to Gemini
-                await session.send_realtime_input(
-                    media={
-                        "data": data,
-                        "mime_type": f"audio/pcm;rate={SEND_SAMPLE_RATE}",
-                    }
-                )
+                        # Always send the audio data to Gemini
+                        await session.send_realtime_input(
+                            media={
+                                "data": data,
+                                "mime_type": f"audio/pcm;rate={SEND_SAMPLE_RATE}",
+                            }
+                        )
 
-                audio_queue.task_done()
+                        audio_queue.task_done()
+                    except asyncio.TimeoutError:
+                        continue
+                    except Exception as e:
+                        if not audio_manager._should_stop():
+                            print(f"Error in audio processing: {e}")
+                        break
 
-        async def receive_and_play():
-            while True:
+            async def receive_and_play():
+                while not audio_manager._should_stop():
+                    try:
+                        input_transcriptions = []
+                        output_transcriptions = []
 
-                input_transcriptions = []
-                output_transcriptions = []
+                        async for response in session.receive():
+                            if audio_manager._should_stop():
+                                break
 
-                async for response in session.receive():
+                            # retrieve continously resumable session ID
+                            if response.session_resumption_update:
+                                update = response.session_resumption_update
+                                if update.resumable and update.new_handle:
+                                    print(f"new SESSION: {update.new_handle}")
 
-                    # retrieve continously resumable session ID
-                    if response.session_resumption_update:
-                        update = response.session_resumption_update
-                        if update.resumable and update.new_handle:
-                            # The handle should be retained and linked to the session.
-                            print(f"new SESSION: {update.new_handle}")
-
-                    # Check if the connection will be soon terminated
-                    if response.go_away is not None:
-                        print(response.go_away.time_left)
-
-                    # Handle tool calls
-                    if response.tool_call:
-                        print(f"📝 Tool call received: {response.tool_call}")
-
-                        function_responses = []
-
-                        for function_call in response.tool_call.function_calls:
-                            name = function_call.name
-                            args = function_call.args
-                            call_id = function_call.id
-
-                            # Handle get_order_status function
-                            if name == "get_order_status":
-                                try:
-
-                                    # Get order_id (required)
-                                    order_id = args["order_id"]
-                                    # Call order status function
-
-                                    result = get_order_status(order_id)
-
-                                    function_responses.append(
-                                        {
-                                            "name": name,
-                                            "response": {"result": result},
-                                            "id": call_id,
-                                        }
-                                    )
-
-                                    print(
-                                        f"📦 Order status function executed for order {order_id}"
-                                    )
-
-                                except Exception as e:
-                                    print(f"Error executing order status function: {e}")
-                                    traceback.print_exc()
-
-                        # Send function responses back to Gemini
-
-                        if function_responses:
-                            print(f"Sending function responses: {function_responses}")
-                            for response in function_responses:
-                                await session.send_tool_response(
-                                    function_responses={
-                                        "name": response["name"],
-                                        "response": response["response"]["result"],
-                                        "id": response["id"],
-                                    }
+                            # Check if the connection will be soon terminated
+                            if response.go_away is not None:
+                                print(
+                                    f"Connection terminating in: {response.go_away.time_left}"
                                 )
 
-                            continue
+                            # Handle tool calls
+                            if response.tool_call:
+                                print(f"🔧 Tool call received: {response.tool_call}")
 
-                    server_content = response.server_content
+                                function_responses = []
 
-                    if (
-                        hasattr(server_content, "interrupted")
-                        and server_content.interrupted
-                    ):
-                        print(f"🤐 INTERRUPTION DETECTED")
-                        audio_manager.interrupt()
+                                for function_call in response.tool_call.function_calls:
+                                    name = function_call.name
+                                    args = function_call.args
+                                    call_id = function_call.id
 
-                    if server_content and server_content.model_turn:
-                        for part in server_content.model_turn.parts:
-                            if part.inline_data:
-                                audio_manager.add_audio(part.inline_data.data)
+                                    # Handle get_order_status function
+                                    if name == "get_order_status":
+                                        try:
+                                            order_id = args["order_id"]
+                                            result = get_order_status(order_id)
 
-                    if server_content and server_content.turn_complete:
-                        print("✅ Gemini done talking")
+                                            function_responses.append(
+                                                {
+                                                    "name": name,
+                                                    "response": {"result": result},
+                                                    "id": call_id,
+                                                }
+                                            )
 
-                    output_transcription = getattr(
-                        response.server_content, "output_transcription", None
-                    )
-                    if output_transcription and output_transcription.text:
-                        output_transcriptions.append(output_transcription.text)
+                                            print(
+                                                f"📦 Order status function executed for order {order_id}"
+                                            )
 
-                    input_transcription = getattr(
-                        response.server_content, "input_transcription", None
-                    )
-                    if input_transcription and input_transcription.text:
-                        input_transcriptions.append(input_transcription.text)
+                                        except Exception as e:
+                                            print(
+                                                f"Error executing order status function: {e}"
+                                            )
+                                            traceback.print_exc()
 
-                print(f"Output transcription: {''.join(output_transcriptions)}")
-                print(f"Input transcription: {''.join(input_transcriptions)}")
+                                # Send function responses back to Gemini
+                                if function_responses:
+                                    print(
+                                        f"Sending function responses: {function_responses}"
+                                    )
+                                    for response in function_responses:
+                                        await session.send_tool_response(
+                                            function_responses={
+                                                "name": response["name"],
+                                                "response": response["response"][
+                                                    "result"
+                                                ],
+                                                "id": response["id"],
+                                            }
+                                        )
+                                    continue
 
-        # Start all tasks with proper task creation
-        tg.create_task(listen_for_audio())
-        tg.create_task(process_and_send_audio())
-        tg.create_task(receive_and_play())
+                            server_content = response.server_content
 
+                            if (
+                                hasattr(server_content, "interrupted")
+                                and server_content.interrupted
+                            ):
+                                print(f"🤐 INTERRUPTION DETECTED")
+                                audio_manager.interrupt()
 
-import asyncio
-import traceback
+                            if server_content and server_content.model_turn:
+                                for part in server_content.model_turn.parts:
+                                    if part.inline_data:
+                                        audio_manager.add_audio(part.inline_data.data)
+
+                            if server_content and server_content.turn_complete:
+                                print("✅ Gemini done talking")
+
+                            output_transcription = getattr(
+                                response.server_content, "output_transcription", None
+                            )
+                            if output_transcription and output_transcription.text:
+                                output_transcriptions.append(output_transcription.text)
+
+                            input_transcription = getattr(
+                                response.server_content, "input_transcription", None
+                            )
+                            if input_transcription and input_transcription.text:
+                                input_transcriptions.append(input_transcription.text)
+
+                        if output_transcriptions:
+                            print(
+                                f"Output transcription: {''.join(output_transcriptions)}"
+                            )
+                        if input_transcriptions:
+                            print(
+                                f"Input transcription: {''.join(input_transcriptions)}"
+                            )
+
+                    except Exception as e:
+                        if not audio_manager._should_stop():
+                            print(f"Error in receive_and_play: {e}")
+                            traceback.print_exc()
+                        break
+
+            # Start all tasks
+            async with asyncio.TaskGroup() as tg:
+                tg.create_task(listen_for_audio())
+                tg.create_task(process_and_send_audio())
+                tg.create_task(receive_and_play())
+
+    except Exception as e:
+        print(f"Error in audio loop: {e}")
+        traceback.print_exc()
+
+    finally:
+        # Always cleanup
+        await audio_manager.cleanup()
+        print("🛑 Audio loop stopped")
 
 
 def run_audio_loop():
     """Run the audio loop with error handling."""
     try:
-        asyncio.run(audio_loop(), debug=True)
+        asyncio.run(audio_loop(), debug=False)
     except KeyboardInterrupt:
         print("Exiting application via KeyboardInterrupt...")
     except Exception as e:
         print(f"Unhandled exception in audio loop: {e}")
         traceback.print_exc()
+    finally:
+        print("Audio loop thread exiting...")
