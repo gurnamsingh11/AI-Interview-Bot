@@ -2,6 +2,8 @@ import streamlit as st
 import threading
 import time
 import asyncio
+import PyPDF2
+import io
 from face_tracker.camera import generate_frames
 from voice_assistant.main import run_audio_loop, set_stop_event, set_jd_cr
 
@@ -20,6 +22,10 @@ if "jd_text" not in st.session_state:
     st.session_state.jd_text = ""
 if "cr_text" not in st.session_state:
     st.session_state.cr_text = ""
+if "uploaded_pdf" not in st.session_state:
+    st.session_state.uploaded_pdf = None
+if "pdf_extracted_text" not in st.session_state:
+    st.session_state.pdf_extracted_text = ""
 
 # Page header
 st.title("AI Interview Bot")
@@ -43,25 +49,90 @@ with sidebar_col:
         help="Enter the job description for the interview",
     )
 
-    # Candidate Resume input
-    cr_input = st.text_area(
-        "Candidate Resume",
-        value=st.session_state.cr_text,
-        height=150,
-        placeholder="Paste the candidate's resume here...",
-        help="Enter the candidate's resume for the interview",
+    # Function to extract text from PDF
+    def extract_text_from_pdf(pdf_file):
+        """Extract text from uploaded PDF file"""
+        try:
+            # Read the PDF file
+            pdf_reader = PyPDF2.PdfReader(io.BytesIO(pdf_file.read()))
+
+            text = ""
+            for page in pdf_reader.pages:
+                text += page.extract_text() + "\n"
+
+            return text.strip()
+        except Exception as e:
+            st.error(f"Error extracting text from PDF: {str(e)}")
+            return ""
+
+    # Candidate Resume PDF upload
+    st.markdown("**Candidate Resume**")
+    uploaded_file = st.file_uploader(
+        "Upload Resume (PDF)",
+        type=["pdf"],
+        help="Upload the candidate's resume in PDF format",
+        label_visibility="collapsed",
     )
 
-    # Update session state when inputs change
+    # Process uploaded PDF
+    if uploaded_file is not None:
+        if uploaded_file != st.session_state.uploaded_pdf:
+            # New file uploaded
+            st.session_state.uploaded_pdf = uploaded_file
+
+            with st.spinner("Extracting text from PDF..."):
+                extracted_text = extract_text_from_pdf(uploaded_file)
+                st.session_state.pdf_extracted_text = extracted_text
+                st.session_state.cr_text = extracted_text
+
+                if extracted_text:
+                    st.success(
+                        f"✅ Resume text extracted successfully! ({len(extracted_text)} characters)"
+                    )
+                else:
+                    st.error(
+                        "❌ Failed to extract text from PDF. Please try a different file."
+                    )
+
+    # Show extracted text preview (optional - can be collapsed)
+    if st.session_state.pdf_extracted_text:
+        with st.expander("📄 View Extracted Resume Text", expanded=False):
+            st.text_area(
+                "Extracted Text Preview",
+                value=st.session_state.pdf_extracted_text,
+                height=200,
+                disabled=True,
+                label_visibility="collapsed",
+            )
+
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button("🔄 Re-extract Text", help="Re-process the uploaded PDF"):
+                    if st.session_state.uploaded_pdf:
+                        with st.spinner("Re-extracting text..."):
+                            extracted_text = extract_text_from_pdf(
+                                st.session_state.uploaded_pdf
+                            )
+                            st.session_state.pdf_extracted_text = extracted_text
+                            st.session_state.cr_text = extracted_text
+                            st.rerun()
+
+            with col2:
+                if st.button("🗑️ Clear Resume", help="Remove the uploaded resume"):
+                    st.session_state.uploaded_pdf = None
+                    st.session_state.pdf_extracted_text = ""
+                    st.session_state.cr_text = ""
+                    st.rerun()
+
+    # Update session state when JD input changes
     if jd_input != st.session_state.jd_text:
         st.session_state.jd_text = jd_input
         # Update the global variables in voice assistant
         set_jd_cr(jd_input, st.session_state.cr_text)
 
-    if cr_input != st.session_state.cr_text:
-        st.session_state.cr_text = cr_input
-        # Update the global variables in voice assistant
-        set_jd_cr(st.session_state.jd_text, cr_input)
+    # Update voice assistant when CR changes (from PDF extraction)
+    if st.session_state.cr_text:
+        set_jd_cr(st.session_state.jd_text, st.session_state.cr_text)
 
     # Show status of JD and CR
     jd_status = "✅ Ready" if st.session_state.jd_text.strip() else "❌ Missing"
